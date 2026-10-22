@@ -54,18 +54,16 @@ este playbook paso a paso. Cada paso es **idempotente**: comprueba si ya existe 
 
 Antes de empezar, necesitas obtener del humano:
 
-1. **IP del servidor** (la IP fija del servidor Ubuntu en la red local)
-2. **Contraseña de administrador** para los servicios (una sola contraseña maestra que usarás para Harbor, GitLab, SonarQube, MongoDB, RabbitMQ, Grafana, y como base para el JWT secret)
-3. **Confirmación de permisos de root** (necesitas sudo sin restricciones)
+1. **IP del servidor** (la IP fija del servidor Ubuntu en la red local), como `SERVER_IP`.
+2. **Confirmación** de que puedes usar `sudo` para los pasos de instalación. Enséñale la lista de pasos con `sudo` antes de empezar.
 
-Pide estos 3 datos con AskUserQuestion antes de empezar. Almacénalos mentalmente como:
-- `SERVER_IP` (ejemplo: 192.168.1.100)
-- `ADMIN_PASSWORD` (ejemplo: MiPasswordSegura123!)
-- El JWT secret será: `{ADMIN_PASSWORD}_JWT_SECRET_32_CHARS!!` (asegúrate de que tenga 32+ caracteres)
+**Nunca pidas contraseñas ni secretos en la conversación.** Lo que se escribe en el chat pasa por el contexto del modelo. Los secretos los genera el propio servidor en el PASO 0b: uno aleatorio y distinto por servicio, en `~/.homelab/secretos.env` (permisos 0600). No los muestres ni los copies en tus respuestas. Si el humano necesita uno, dile en qué fichero está.
 
 ### Importante: ejecución
 
 - Ejecuta los comandos con `sudo` cuando sea necesario (pide permiso al humano la primera vez).
+- En cada bloque que use secretos, cárgalos primero sin mostrarlos: `set -a; . ~/.homelab/secretos.env; set +a`.
+- Nunca hagas `echo` de una variable de secreto ni la pongas en una URL que se vaya a mostrar.
 - Cada sección tiene un bloque CHECK y un bloque FIX. Ejecuta CHECK primero. Si pasa, salta al siguiente. Si no, ejecuta FIX.
 - Si un paso falla, NO sigas adelante. Diagnostica, arregla, y re-verifica antes de continuar.
 - Usa `set -e` en scripts multi-línea para fallar rápido.
@@ -83,6 +81,31 @@ ip -4 addr show | grep "inet " | grep -v 127.0.0.1  # Confirmar IP
 ```
 
 **FIX:** Si sudo no funciona, pide al humano que ejecute `sudo usermod -aG sudo $USER`.
+
+---
+
+### PASO 0b: Secretos por servicio (los genera la máquina, nunca el chat)
+
+**CHECK:**
+```bash
+test -s ~/.homelab/secretos.env && stat -c %a ~/.homelab/secretos.env  # Debe existir y dar 600
+```
+
+**FIX:** generarlos una sola vez (si el fichero ya existe, no se toca):
+```bash
+set -e
+umask 077
+mkdir -p ~/.homelab
+if [ ! -s ~/.homelab/secretos.env ]; then
+  {
+    for s in HARBOR GITLAB JENKINS SONAR MONGO RABBIT GRAFANA; do
+      printf '%s_PASSWORD=%s\n' "$s" "$(openssl rand -base64 24 | tr -d '/+=')"
+    done
+    printf 'JWT_SECRET=%s\n' "$(openssl rand -base64 48 | tr -d '/+=')"
+  } > ~/.homelab/secretos.env
+fi
+chmod 600 ~/.homelab/secretos.env
+```
 
 ---
 
@@ -210,7 +233,7 @@ Editar harbor.yml — Reemplazar estos valores:
 - `hostname: server`
 - `http.port: 8085`
 - Comentar toda la sección `https:`
-- `harbor_admin_password: {ADMIN_PASSWORD}`
+- `harbor_admin_password: ${HARBOR_PASSWORD}`
 - `data_volume: /data/harbor`
 
 ```bash
@@ -240,7 +263,7 @@ sudo systemctl enable harbor
 
 Crear proyecto en Harbor:
 ```bash
-curl -s -u "admin:{ADMIN_PASSWORD}" -X POST "http://server:8085/api/v2.0/projects" \
+curl -s -u "admin:${HARBOR_PASSWORD}" -X POST "http://server:8085/api/v2.0/projects" \
   -H "Content-Type: application/json" \
   -d '{"project_name":"project","public":true}' || true
 ```
@@ -258,7 +281,7 @@ curl -s -o /dev/null -w "%{http_code}" http://server:8081/-/health 2>/dev/null |
 ```bash
 sudo apt install -y curl openssh-server ca-certificates tzdata perl
 curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | sudo bash
-sudo EXTERNAL_URL="http://server:8081" GITLAB_ROOT_PASSWORD="{ADMIN_PASSWORD}" apt install -y gitlab-ce
+sudo EXTERNAL_URL="http://server:8081" GITLAB_ROOT_PASSWORD="${GITLAB_PASSWORD}" apt install -y gitlab-ce
 ```
 
 Esperar a que GitLab arranque (puede tardar 2-5 minutos):
@@ -276,7 +299,7 @@ Crear proyecto "project" en GitLab via API:
 ```bash
 # Obtener token personal (crear via API con password del root)
 GITLAB_TOKEN=$(curl -s -X POST "http://server:8081/oauth/token" \
-  -d "grant_type=password&username=root&password={ADMIN_PASSWORD}" | jq -r '.access_token')
+  -d "grant_type=password&username=root&password=${GITLAB_PASSWORD}" | jq -r '.access_token')
 
 # Crear proyecto
 curl -s -X POST "http://server:8081/api/v4/projects" \
@@ -288,7 +311,7 @@ Subir el repositorio a GitLab:
 ```bash
 cd {RUTA_DEL_REPOSITORIO}
 git remote remove gitlab 2>/dev/null || true
-git remote add gitlab http://root:{ADMIN_PASSWORD}@server:8081/root/project.git
+git remote add gitlab http://root:${GITLAB_PASSWORD}@server:8081/root/project.git
 git push -u gitlab main
 ```
 
@@ -357,7 +380,7 @@ en http://server:8080. Que instale los plugins sugeridos + plugin "GitLab"). Una
 # URL base
 JENKINS_URL="http://server:8080"
 JENKINS_USER="admin"
-JENKINS_PASS="{ADMIN_PASSWORD}"
+JENKINS_PASS="${JENKINS_PASSWORD}"
 
 # Obtener crumb CSRF
 CRUMB=$(curl -s -u "$JENKINS_USER:$JENKINS_PASS" "$JENKINS_URL/crumbIssuer/api/json" | jq -r '.crumb')
@@ -517,14 +540,14 @@ Cambiar contraseña por defecto y crear token:
 ```bash
 # Cambiar password de admin (default: admin/admin)
 curl -s -u admin:admin -X POST "http://server:9000/api/users/change_password" \
-  -d "login=admin&previousPassword=admin&password={ADMIN_PASSWORD}" || true
+  -d "login=admin&previousPassword=admin&password=${SONAR_PASSWORD}" || true
 
 # Crear proyecto
-curl -s -u "admin:{ADMIN_PASSWORD}" -X POST "http://server:9000/api/projects/create" \
+curl -s -u "admin:${SONAR_PASSWORD}" -X POST "http://server:9000/api/projects/create" \
   -d "name=project&project=project" || true
 
 # Generar token para Jenkins
-SONAR_TOKEN=$(curl -s -u "admin:{ADMIN_PASSWORD}" -X POST "http://server:9000/api/user_tokens/generate" \
+SONAR_TOKEN=$(curl -s -u "admin:${SONAR_PASSWORD}" -X POST "http://server:9000/api/user_tokens/generate" \
   -d "name=jenkins" | jq -r '.token')
 echo "SonarQube token: $SONAR_TOKEN"
 ```
@@ -533,7 +556,7 @@ Añadir token de SonarQube a Jenkins:
 ```bash
 JENKINS_URL="http://server:8080"
 JENKINS_USER="admin"
-JENKINS_PASS="{ADMIN_PASSWORD}"
+JENKINS_PASS="${JENKINS_PASSWORD}"
 CRUMB=$(curl -s -u "$JENKINS_USER:$JENKINS_PASS" "$JENKINS_URL/crumbIssuer/api/json" | jq -r '.crumb')
 CRUMB_HEADER=$(curl -s -u "$JENKINS_USER:$JENKINS_PASS" "$JENKINS_URL/crumbIssuer/api/json" | jq -r '.crumbRequestField')
 
@@ -574,7 +597,7 @@ services:
       - "27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: {ADMIN_PASSWORD}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
     volumes:
       - mongodb_data:/data/db
       - mongodb_config:/data/configdb
@@ -595,7 +618,7 @@ cd /opt/mongodb && docker compose up -d
 **CHECK:**
 ```bash
 docker ps --filter name=rabbitmq --format '{{.Status}}' | grep -q "Up" && echo "OK" || echo "NO_RABBITMQ"
-curl -s -u "admin:{ADMIN_PASSWORD}" http://server:15672/api/overview > /dev/null 2>&1 && echo "OK" || echo "NO_RABBITMQ_API"
+curl -s -u "admin:${RABBIT_PASSWORD}" http://server:15672/api/overview > /dev/null 2>&1 && echo "OK" || echo "NO_RABBITMQ_API"
 ```
 
 **FIX:**
@@ -612,7 +635,7 @@ services:
       - "15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: admin
-      RABBITMQ_DEFAULT_PASS: {ADMIN_PASSWORD}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASSWORD}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     restart: unless-stopped
@@ -668,33 +691,28 @@ kubectl get deployment grafana -n project > /dev/null 2>&1 && echo "OK" || echo 
 
 **FIX:**
 
-Primero, actualizar `k8s/secrets.yaml` con los valores reales del servidor. Usa la herramienta Edit
-para reemplazar las connection strings:
+Los secretos **no se escriben en `k8s/secrets.yaml`**: es un fichero versionado y, si lo editas tú, su contenido pasa por el contexto del modelo. `k8s/secrets.yaml` queda como plantilla con `CAMBIAR` y **no se aplica**. El Secret se crea en el clúster desde las variables del servidor:
 
-```
-mongodb-connection: "mongodb://admin:{ADMIN_PASSWORD}@{SERVER_IP}:27017"
-rabbitmq-connection: "amqp://admin:{ADMIN_PASSWORD}@{SERVER_IP}:5672"
-redis-connection: "{SERVER_IP}:6379"
-jwt-secret: "{ADMIN_PASSWORD}_JWT_SECRET_32_CHARS!!"
-sentry-dsn: ""
-```
-
-También actualizar `k8s/observability/grafana.yaml`: reemplazar `GF_SECURITY_ADMIN_PASSWORD` value
-de "CAMBIAR" a "{ADMIN_PASSWORD}".
-
-Luego aplicar:
 ```bash
+set -a; . ~/.homelab/secretos.env; set +a
 cd {RUTA_DEL_REPOSITORIO}
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/secrets.yaml
+kubectl create secret generic project-secrets -n project \
+  --from-literal=mongodb-connection="mongodb://admin:${MONGO_PASSWORD}@{SERVER_IP}:27017" \
+  --from-literal=rabbitmq-connection="amqp://admin:${RABBIT_PASSWORD}@{SERVER_IP}:5672" \
+  --from-literal=redis-connection="{SERVER_IP}:6379" \
+  --from-literal=jwt-secret="${JWT_SECRET}" \
+  --from-literal=sentry-dsn="" \
+  --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -R -f k8s/observability/
+kubectl -n project set env deployment/grafana GF_SECURITY_ADMIN_PASSWORD="${GRAFANA_PASSWORD}" > /dev/null
 
 # Crear secret para pull de imágenes de Harbor
 kubectl create secret docker-registry harbor-registry \
   --docker-server=server:8085 \
   --docker-username=admin \
-  --docker-password="{ADMIN_PASSWORD}" \
+  --docker-password="${HARBOR_PASSWORD}" \
   -n project 2>/dev/null || true
 ```
 
@@ -730,7 +748,7 @@ docker tag server:8085/project/worker:v1 server:8085/project/worker:latest
 docker tag server:8085/project/frontend:v1 server:8085/project/frontend:latest
 
 # Login y push a Harbor
-echo "{ADMIN_PASSWORD}" | docker login server:8085 -u admin --password-stdin
+printf %s "$HARBOR_PASSWORD" | docker login server:8085 -u admin --password-stdin
 docker push server:8085/project/api:v1
 docker push server:8085/project/api:latest
 docker push server:8085/project/worker:v1
@@ -759,7 +777,7 @@ kubectl rollout status deployment/frontend -n project --timeout=60s
 ```bash
 # Verificar que el webhook existe
 GITLAB_TOKEN=$(curl -s -X POST "http://server:8081/oauth/token" \
-  -d "grant_type=password&username=root&password={ADMIN_PASSWORD}" | jq -r '.access_token')
+  -d "grant_type=password&username=root&password=${GITLAB_PASSWORD}" | jq -r '.access_token')
 PROJECT_ID=$(curl -s -H "Authorization: Bearer $GITLAB_TOKEN" "http://server:8081/api/v4/projects" | jq -r '.[0].id')
 HOOKS=$(curl -s -H "Authorization: Bearer $GITLAB_TOKEN" "http://server:8081/api/v4/projects/$PROJECT_ID/hooks" | jq length)
 [ "$HOOKS" -gt "0" ] && echo "OK" || echo "NO_WEBHOOK"
@@ -768,7 +786,7 @@ HOOKS=$(curl -s -H "Authorization: Bearer $GITLAB_TOKEN" "http://server:8081/api
 **FIX:**
 ```bash
 GITLAB_TOKEN=$(curl -s -X POST "http://server:8081/oauth/token" \
-  -d "grant_type=password&username=root&password={ADMIN_PASSWORD}" | jq -r '.access_token')
+  -d "grant_type=password&username=root&password=${GITLAB_PASSWORD}" | jq -r '.access_token')
 PROJECT_ID=$(curl -s -H "Authorization: Bearer $GITLAB_TOKEN" "http://server:8081/api/v4/projects" | jq -r '.[0].id')
 
 curl -s -X POST "http://server:8081/api/v4/projects/$PROJECT_ID/hooks" \
@@ -791,8 +809,8 @@ echo -n "Harbor:      "; curl -sf http://server:8085/api/v2.0/health > /dev/null
 echo -n "GitLab:      "; curl -sf http://server:8081/-/health > /dev/null && echo "OK" || echo "FALLO"
 echo -n "Jenkins:     "; curl -sf http://server:8080/login > /dev/null && echo "OK" || echo "FALLO"
 echo -n "SonarQube:   "; curl -sf http://server:9000/api/system/status > /dev/null && echo "OK" || echo "FALLO"
-echo -n "MongoDB:     "; docker exec mongodb mongosh --eval "db.runCommand({ping:1})" -u admin -p "{ADMIN_PASSWORD}" --authenticationDatabase admin --quiet > /dev/null 2>&1 && echo "OK" || echo "FALLO"
-echo -n "RabbitMQ:    "; curl -sf -u "admin:{ADMIN_PASSWORD}" http://server:15672/api/overview > /dev/null && echo "OK" || echo "FALLO"
+echo -n "MongoDB:     "; docker exec mongodb mongosh --eval "db.runCommand({ping:1})" -u admin -p "${MONGO_PASSWORD}" --authenticationDatabase admin --quiet > /dev/null 2>&1 && echo "OK" || echo "FALLO"
+echo -n "RabbitMQ:    "; curl -sf -u "admin:${RABBIT_PASSWORD}" http://server:15672/api/overview > /dev/null && echo "OK" || echo "FALLO"
 echo -n "Redis:       "; docker exec redis redis-cli ping 2>/dev/null | grep -q PONG && echo "OK" || echo "FALLO"
 echo -n "API:         "; curl -sf http://server:30080/health > /dev/null && echo "OK" || echo "FALLO"
 echo -n "Frontend:    "; curl -sf http://server:30081/ > /dev/null && echo "OK" || echo "FALLO"
@@ -849,7 +867,7 @@ cd /opt/redis && docker compose restart
 
 ### Backup de MongoDB
 ```bash
-docker exec mongodb mongodump -u admin -p "{ADMIN_PASSWORD}" --authenticationDatabase admin --archive=/tmp/backup.gz --gzip
+docker exec mongodb mongodump -u admin -p "${MONGO_PASSWORD}" --authenticationDatabase admin --archive=/tmp/backup.gz --gzip
 docker cp mongodb:/tmp/backup.gz /opt/backups/backup-$(date +%Y%m%d).gz
 ```
 
@@ -858,7 +876,7 @@ docker cp mongodb:/tmp/backup.gz /opt/backups/backup-$(date +%Y%m%d).gz
 cd {RUTA_DEL_REPOSITORIO}
 git push gitlab main
 # El webhook dispara Jenkins automáticamente
-# Alternativamente, lanza manual: curl -X POST http://admin:{ADMIN_PASSWORD}@server:8080/job/project-pipeline/build
+# Alternativamente, lanza manual: curl -X POST http://admin:${JENKINS_PASSWORD}@server:8080/job/project-pipeline/build
 ```
 
 ---
@@ -878,7 +896,7 @@ git push gitlab main
 
 5. **Reemplaza placeholders** al ejecutar:
    - `{SERVER_IP}` → IP real del servidor
-   - `{ADMIN_PASSWORD}` → Contraseña maestra que te dio el humano
+   - `${SERVICIO_PASSWORD}` y `${JWT_SECRET}` → variables de `~/.homelab/secretos.env` (cárgalas en el shell; no las sustituyas a mano ni las muestres)
    - `{RUTA_DEL_REPOSITORIO}` → Directorio donde está clonado este repo
 
 6. **Si el humano dice "despliega"**, ejecuta el playbook completo (pasos 0-15).
