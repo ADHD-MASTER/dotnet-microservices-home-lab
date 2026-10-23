@@ -1,6 +1,4 @@
-# Project Template - .NET 10 Cloud-Native Architecture
-
-Plantilla de arquitectura empresarial cloud-native lista para produccion. Diseñada para servir como scaffolding de nuevos proyectos: renombra `Project` por el nombre de tu dominio, configura tus secretos y empieza a desarrollar logica de negocio.
+# Project Template - 
 
 ### Despliegue automatizado con Claude Code
 
